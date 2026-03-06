@@ -464,7 +464,4 @@ MIT License
 
 ---
 
-**Version**: 1.0.0  
-**Last Updated**: 5 Maret 2026
-
 Dibuat dengan ❤️ untuk meningkatkan keselamatan kerja.
