@@ -3,7 +3,7 @@
  */
 import { useState } from 'react'
 import { useDropzone } from 'react-dropzone'
-import { Upload, Video as VideoIcon, CheckCircle, AlertCircle } from 'lucide-react'
+import { Upload, Video as VideoIcon, CheckCircle, AlertCircle, BarChart3, Info } from 'lucide-react'
 import { detectionService } from '../services/detectionService'
 import toast from 'react-hot-toast'
 
@@ -16,6 +16,7 @@ const DetectVideoPage = () => {
   const [isProcessing, setIsProcessing] = useState(false)
   const [sessionData, setSessionData] = useState(null)
   const [detectionResults, setDetectionResults] = useState([])
+  const [trackingStats, setTrackingStats] = useState(null)
   
   const onDrop = (acceptedFiles) => {
     const file = acceptedFiles[0]
@@ -43,77 +44,147 @@ const DetectVideoPage = () => {
     }
     
     setIsProcessing(true)
+    setProgress(0)
+    setStatus('PROCESSING')
     
     try {
       const formData = new FormData()
       formData.append('video', selectedFile)
       formData.append('name', selectedFile.name)
       
-      const response = await detectionService.detectVideo(formData)
-      setTaskId(response.task_id)
-      setSessionId(response.session_id)
-      toast.success('Video berhasil diupload. Sedang diproses...')
+      // Simulate progress (karena proses synchronous)
+      const progressInterval = setInterval(() => {
+        setProgress(prev => {
+          if (prev >= 90) return prev
+          return prev + 10
+        })
+      }, 1000)
       
-      // Start polling task status
-      pollTaskStatus(response.task_id, response.session_id)
-    } catch (error) {
-      toast.error('Gagal upload video: ' + (error.response?.data?.error || error.message))
+      const response = await detectionService.detectVideo(formData)
+      
+      clearInterval(progressInterval)
+      setProgress(100)
+      setStatus('SUCCESS')
       setIsProcessing(false)
-    }
-  }
-  
-  const pollTaskStatus = async (id, sessId) => {
-    const interval = setInterval(async () => {
-      try {
-        const response = await detectionService.checkTaskStatus(id)
-        setStatus(response.status)
-        
-        if (response.status === 'PROGRESS') {
-          setProgress(response.progress || 0)
-        } else if (response.status === 'SUCCESS') {
-          setProgress(100)
-          setIsProcessing(false)
-          toast.success('Video berhasil diproses!')
-          clearInterval(interval)
-          
-          // Load session data dan hasil deteksi
-          loadSessionData(sessId)
-        } else if (response.status === 'FAILURE') {
-          setIsProcessing(false)
-          toast.error('Gagal memproses video')
-          clearInterval(interval)
-        }
-      } catch (error) {
-        console.error('Error polling task:', error)
+      
+      // Set session data
+      if (response.session) {
+        setSessionData(response.session)
+        setSessionId(response.session.id)
       }
-    }, 2000)
+      
+      // Show tracking stats if available
+      if (response.stats?.tracking) {
+        const trackingStats = response.stats.tracking
+        setTrackingStats(trackingStats)
+        toast.success(
+          `Video berhasil diproses! ${trackingStats.total_unique_objects} objek unik terdeteksi.`,
+          { duration: 5000 }
+        )
+      } else {
+        toast.success(response.message || 'Video berhasil diproses!')
+      }
+      
+      // Load detection results with a small delay to ensure DB commit
+      if (response.session?.id) {
+        setTimeout(() => {
+          loadSessionData(response.session.id)
+        }, 500)
+      }
+    } catch (error) {
+      setStatus('FAILURE')
+      setIsProcessing(false)
+      toast.error('Gagal memproses video: ' + (error.response?.data?.error || error.message))
+    }
   }
   
   const loadSessionData = async (sessId) => {
     try {
-      const session = await detectionService.getSession(sessId)
-      setSessionData(session)
+      console.log('Loading results for session:', sessId)
       
-      // Load detection results
-      if (session.results && session.results.length > 0) {
-        setDetectionResults(session.results)
+      // Load detection results for this session
+      const response = await detectionService.getResults({ session: sessId })
+      
+      console.log('Detection results response:', response)
+      console.log('Response type:', typeof response)
+      console.log('Is array:', Array.isArray(response))
+      
+      // Handle both array response and paginated response
+      let results = []
+      if (Array.isArray(response)) {
+        results = response
+      } else if (response && response.results) {
+        results = response.results
+      } else if (response && typeof response === 'object') {
+        // If response is a single object, wrap it in array
+        results = [response]
+      }
+      
+      console.log('Processed results:', results)
+      
+      if (results && results.length > 0) {
+        setDetectionResults(results)
+        toast.success(`Berhasil memuat ${results.length} hasil deteksi`)
+      } else {
+        console.warn('No results found in response')
+        toast.info('Tidak ada hasil deteksi ditemukan')
       }
     } catch (error) {
       console.error('Error loading session data:', error)
-      toast.error('Gagal memuat hasil deteksi')
+      console.error('Error response:', error.response)
+      toast.error('Gagal memuat hasil deteksi: ' + (error.response?.data?.detail || error.message))
     }
   }
   
-  // Calculate aggregate metrics from all detection results
+  // Calculate aggregate metrics from all detection results using unique track IDs
   const calculateAggregateMetrics = () => {
     if (detectionResults.length === 0) return null
     
-    const totalPersons = detectionResults.reduce((sum, r) => sum + (r.total_persons || 0), 0)
+    // Collect unique track IDs across all frames
+    const uniquePersonTracks = new Set()
+    const uniqueHelmetTracks = new Set()
+    const uniqueVestTracks = new Set()
+    const uniqueNoHelmetTracks = new Set()
+    const uniqueNoVestTracks = new Set()
+    
+    // Iterate through all frames and collect unique track IDs
+    detectionResults.forEach(result => {
+      if (result.detections && Array.isArray(result.detections)) {
+        result.detections.forEach(det => {
+          const trackId = det.track_id
+          const className = det.class_name
+          
+          // Only count if track_id exists (tracking enabled)
+          if (trackId !== undefined && trackId !== null) {
+            if (className === 'person') {
+              uniquePersonTracks.add(trackId)
+            } else if (className === 'hardhat' || className === 'helmet') {
+              uniqueHelmetTracks.add(trackId)
+            } else if (className === 'safety-vest' || className === 'vest') {
+              uniqueVestTracks.add(trackId)
+            } else if (className === 'no-hardhat' || className === 'no-helmet') {
+              uniqueNoHelmetTracks.add(trackId)
+            } else if (className === 'no-safety-vest' || className === 'no-vest') {
+              uniqueNoVestTracks.add(trackId)
+            }
+          }
+        })
+      }
+    })
+    
+    // Calculate totals from unique tracks
+    const totalPersons = uniquePersonTracks.size || Math.max(
+      uniqueHelmetTracks.size + uniqueNoHelmetTracks.size,
+      uniqueVestTracks.size + uniqueNoVestTracks.size
+    )
+    
+    const withHelmet = uniqueHelmetTracks.size
+    const withVest = uniqueVestTracks.size
+    const withoutHelmet = uniqueNoHelmetTracks.size
+    const withoutVest = uniqueNoVestTracks.size
+    
+    // Calculate average compliance from all frames
     const avgCompliance = detectionResults.reduce((sum, r) => sum + (r.compliance_score || 0), 0) / detectionResults.length
-    const withHelmet = detectionResults.reduce((sum, r) => sum + (r.persons_with_helmet || 0), 0)
-    const withVest = detectionResults.reduce((sum, r) => sum + (r.persons_with_vest || 0), 0)
-    const withoutHelmet = detectionResults.reduce((sum, r) => sum + (r.persons_without_helmet || 0), 0)
-    const withoutVest = detectionResults.reduce((sum, r) => sum + (r.persons_without_vest || 0), 0)
     
     return {
       totalPersons,
@@ -229,13 +300,48 @@ const DetectVideoPage = () => {
           
           {metrics ? (
             <div>
+              {/* Tracking Statistics (if available) */}
+              {trackingStats && (
+                <div className="mb-6 p-4 bg-indigo-50 rounded-lg border border-indigo-200">
+                  <h3 className="text-sm font-semibold text-indigo-800 mb-3 flex items-center gap-2">
+                    <BarChart3 className="w-4 h-4" />
+                    <span>Tracking Statistics (Unique Objects)</span>
+                  </h3>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="bg-white p-3 rounded">
+                      <p className="text-xs text-indigo-600">Total Unique</p>
+                      <p className="text-xl font-bold text-indigo-800">
+                        {trackingStats.total_unique_objects}
+                      </p>
+                    </div>
+                    <div className="bg-white p-3 rounded">
+                      <p className="text-xs text-indigo-600">Frames Processed</p>
+                      <p className="text-xl font-bold text-indigo-800">
+                        {trackingStats.frame_count}
+                      </p>
+                    </div>
+                    <div className="bg-white p-3 rounded">
+                      <p className="text-xs text-indigo-600">Active Tracks</p>
+                      <p className="text-xl font-bold text-indigo-800">
+                        {trackingStats.active_tracks}
+                      </p>
+                    </div>
+                  </div>
+                  <p className="text-xs text-indigo-600 mt-2 flex items-center gap-1">
+                    <Info className="w-3 h-3" />
+                    <span>Metrics di bawah dihitung dari unique track IDs untuk menghindari double counting</span>
+                  </p>
+                </div>
+              )}
+              
               {/* Aggregate Metrics Grid */}
               <div className="grid grid-cols-2 gap-4 mb-6">
                 <div className="bg-gray-50 p-4 rounded-lg">
-                  <p className="text-sm text-gray-600">Total Deteksi Orang</p>
+                  <p className="text-sm text-gray-600">Total Unique Orang</p>
                   <p className="text-2xl font-bold text-gray-800">
                     {metrics.totalPersons}
                   </p>
+                  <p className="text-xs text-gray-500 mt-1">Berdasarkan tracking</p>
                 </div>
                 <div className="bg-green-50 p-4 rounded-lg">
                   <p className="text-sm text-gray-600">Avg Compliance</p>
@@ -328,7 +434,7 @@ const DetectVideoPage = () => {
                       {result.annotated_image && (
                         <div className="mt-3">
                           <img
-                            src={`http://localhost/media/${result.annotated_image}`}
+                            src={`/media/${result.annotated_image}`}
                             alt={`Frame ${result.frame_number}`}
                             className="w-full rounded border border-gray-200"
                             loading="lazy"
@@ -360,7 +466,7 @@ const DetectVideoPage = () => {
                                     : 'bg-blue-100 text-blue-700'
                                 }`}
                               >
-                                {det.label}
+                                {det.track_id ? `#${det.track_id} ` : ''}{det.label}
                               </span>
                             ))}
                             {result.detections.length > 5 && (

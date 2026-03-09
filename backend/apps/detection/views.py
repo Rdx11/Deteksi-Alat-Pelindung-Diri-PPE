@@ -10,6 +10,7 @@ from django.utils import timezone
 from django.db.models import Avg, Count, Q
 import cv2
 import os
+import io
 from datetime import timedelta
 
 from .models import DetectionSession, DetectionResult, Alert
@@ -37,9 +38,16 @@ class DetectionResultViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        return DetectionResult.objects.filter(
+        queryset = DetectionResult.objects.filter(
             session__user=self.request.user
-        )
+        ).order_by('-created_at')
+        
+        # Filter by session if provided
+        session_id = self.request.query_params.get('session', None)
+        if session_id:
+            queryset = queryset.filter(session_id=session_id)
+        
+        return queryset
 
 
 class AlertViewSet(viewsets.ModelViewSet):
@@ -87,7 +95,7 @@ def detect_image(request):
         
         # Simpan annotated image
         annotated_path = f"annotated/{session.id}.jpg"
-        full_path = os.path.join('media', annotated_path)
+        full_path = os.path.join(session.source_file.storage.location, annotated_path)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         cv2.imwrite(full_path, result['annotated_image'])
         
@@ -139,7 +147,7 @@ def detect_image(request):
 def detect_video(request):
     """
     Endpoint untuk deteksi video
-    Upload video, proses async via Celery
+    Upload video, proses secara synchronous (tanpa Celery untuk development)
     """
     serializer = VideoDetectionSerializer(data=request.data)
     if not serializer.is_valid():
@@ -154,18 +162,107 @@ def detect_video(request):
             source_file=serializer.validated_data['video']
         )
         
-        # Jalankan task Celery
-        task = process_video_task.delay(str(session.id))
+        # Proses video langsung (tanpa Celery)
+        # Enable tracking untuk video detection
+        yolo_service = YOLODetectionService(enable_tracking=True)
+        
+        # Buka video
+        video_path = session.source_file.path
+        cap = cv2.VideoCapture(video_path)
+        
+        if not cap.isOpened():
+            return Response(
+                {'error': 'Tidak dapat membuka video'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Process setiap N frame (untuk performa)
+        frame_skip = max(1, fps // 2)  # Process 2 frame per detik
+        frame_count = 0
+        processed_count = 0
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            frame_count += 1
+            
+            # Skip frames
+            if frame_count % frame_skip != 0:
+                continue
+            
+            # Deteksi frame
+            result = yolo_service.detect_frame(frame)
+            
+            # Simpan annotated frame menggunakan Django storage
+            # Convert frame to bytes
+            is_success, buffer = cv2.imencode(".jpg", result['annotated_image'])
+            if is_success:
+                io_buf = io.BytesIO(buffer)
+                annotated_filename = f"video_{session.id}_frame_{frame_count}.jpg"
+                
+                # Create DetectionResult with annotated image
+                detection_result = DetectionResult(
+                    session=session,
+                    frame_number=frame_count,
+                    timestamp=frame_count / fps if fps > 0 else 0,
+                    detections=result['detections'],
+                    **result['metrics']
+                )
+                detection_result.annotated_image.save(
+                    annotated_filename,
+                    ContentFile(io_buf.getvalue()),
+                    save=True
+                )
+            else:
+                # Fallback: save without annotated image
+                detection_result = DetectionResult.objects.create(
+                    session=session,
+                    frame_number=frame_count,
+                    timestamp=frame_count / fps if fps > 0 else 0,
+                    detections=result['detections'],
+                    **result['metrics']
+                )
+            
+            # Buat alert jika ada pelanggaran
+            if result['metrics']['persons_without_helmet'] > 0:
+                Alert.objects.create(
+                    session=session,
+                    result=detection_result,
+                    severity='danger',
+                    title='Pekerja Tanpa Helm Terdeteksi',
+                    message=f"Frame {frame_count}: {result['metrics']['persons_without_helmet']} pekerja tanpa helm"
+                )
+            
+            processed_count += 1
+        
+        cap.release()
+        
+        # Get tracking statistics
+        tracking_stats = yolo_service.get_tracking_stats()
+        
+        # Mark session as completed
+        session.completed_at = timezone.now()
+        session.is_active = False
+        session.save()
         
         return Response({
-            'session_id': str(session.id),
-            'task_id': task.id,
-            'message': 'Video sedang diproses. Gunakan task_id untuk cek status.'
-        }, status=status.HTTP_202_ACCEPTED)
+            'session': DetectionSessionSerializer(session).data,
+            'message': f'Video berhasil diproses. Total {processed_count} frame dianalisis.',
+            'stats': {
+                'total_frames': total_frames,
+                'processed_frames': processed_count,
+                'tracking': tracking_stats
+            }
+        }, status=status.HTTP_201_CREATED)
         
     except Exception as e:
         return Response(
-            {'error': f'Error saat upload video: {str(e)}'},
+            {'error': f'Error saat deteksi video: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 

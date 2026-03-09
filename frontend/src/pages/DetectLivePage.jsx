@@ -3,7 +3,7 @@
  */
 import { useState, useRef, useEffect } from 'react'
 import Webcam from 'react-webcam'
-import { Camera, StopCircle, Play } from 'lucide-react'
+import { Camera, StopCircle, Play, BarChart3 } from 'lucide-react'
 import useLiveStore from '../store/liveStore'
 import toast from 'react-hot-toast'
 
@@ -222,42 +222,74 @@ const DetectLivePage = () => {
               
               {/* Metrics Grid */}
               {latestDetection && (
-                <div className="mt-6 grid grid-cols-2 gap-4">
-                  <div className="bg-gray-50 p-4 rounded-lg">
-                    <p className="text-sm text-gray-600">Total Orang</p>
-                    <p className="text-2xl font-bold text-gray-800">
-                      {latestDetection.metrics?.total_persons || 0}
-                    </p>
-                  </div>
-                  <div className="bg-green-50 p-4 rounded-lg">
-                    <p className="text-sm text-gray-600">Compliance Score</p>
-                    <p className="text-2xl font-bold text-green-600">
-                      {latestDetection.metrics?.compliance_score || 0}%
-                    </p>
-                  </div>
-                  <div className="bg-blue-50 p-4 rounded-lg">
-                    <p className="text-sm text-gray-600">Dengan Helm</p>
-                    <p className="text-2xl font-bold text-blue-600">
-                      {latestDetection.metrics?.persons_with_helmet || 0}
-                    </p>
-                  </div>
-                  <div className="bg-purple-50 p-4 rounded-lg">
-                    <p className="text-sm text-gray-600">Dengan Rompi</p>
-                    <p className="text-2xl font-bold text-purple-600">
-                      {latestDetection.metrics?.persons_with_vest || 0}
-                    </p>
-                  </div>
-                  <div className="bg-red-50 p-4 rounded-lg">
-                    <p className="text-sm text-gray-600">Tanpa Helm</p>
-                    <p className="text-2xl font-bold text-red-600">
-                      {latestDetection.metrics?.persons_without_helmet || 0}
-                    </p>
-                  </div>
-                  <div className="bg-yellow-50 p-4 rounded-lg">
-                    <p className="text-sm text-gray-600">Tanpa Rompi</p>
-                    <p className="text-2xl font-bold text-yellow-600">
-                      {latestDetection.metrics?.persons_without_vest || 0}
-                    </p>
+                <div className="mt-6">
+                  {/* Tracking Stats (if available) */}
+                  {latestDetection.tracking_stats && (
+                    <div className="mb-4 p-4 bg-indigo-50 rounded-lg border border-indigo-200">
+                      <h3 className="text-sm font-semibold text-indigo-800 mb-2 flex items-center gap-2">
+                        <BarChart3 className="w-4 h-4" />
+                        <span>Tracking Statistics</span>
+                      </h3>
+                      <div className="grid grid-cols-3 gap-2 text-sm">
+                        <div>
+                          <p className="text-indigo-600">Total Unique</p>
+                          <p className="text-lg font-bold text-indigo-800">
+                            {latestDetection.tracking_stats.total_unique_objects}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-indigo-600">Active Tracks</p>
+                          <p className="text-lg font-bold text-indigo-800">
+                            {latestDetection.tracking_stats.active_tracks}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-indigo-600">Frames</p>
+                          <p className="text-lg font-bold text-indigo-800">
+                            {latestDetection.tracking_stats.frame_count}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="bg-gray-50 p-4 rounded-lg">
+                      <p className="text-sm text-gray-600">Total Orang</p>
+                      <p className="text-2xl font-bold text-gray-800">
+                        {latestDetection.metrics?.total_persons || 0}
+                      </p>
+                    </div>
+                    <div className="bg-green-50 p-4 rounded-lg">
+                      <p className="text-sm text-gray-600">Compliance Score</p>
+                      <p className="text-2xl font-bold text-green-600">
+                        {latestDetection.metrics?.compliance_score || 0}%
+                      </p>
+                    </div>
+                    <div className="bg-blue-50 p-4 rounded-lg">
+                      <p className="text-sm text-gray-600">Dengan Helm</p>
+                      <p className="text-2xl font-bold text-blue-600">
+                        {latestDetection.metrics?.persons_with_helmet || 0}
+                      </p>
+                    </div>
+                    <div className="bg-purple-50 p-4 rounded-lg">
+                      <p className="text-sm text-gray-600">Dengan Rompi</p>
+                      <p className="text-2xl font-bold text-purple-600">
+                        {latestDetection.metrics?.persons_with_vest || 0}
+                      </p>
+                    </div>
+                    <div className="bg-red-50 p-4 rounded-lg">
+                      <p className="text-sm text-gray-600">Tanpa Helm</p>
+                      <p className="text-2xl font-bold text-red-600">
+                        {latestDetection.metrics?.persons_without_helmet || 0}
+                      </p>
+                    </div>
+                    <div className="bg-yellow-50 p-4 rounded-lg">
+                      <p className="text-sm text-gray-600">Tanpa Rompi</p>
+                      <p className="text-2xl font-bold text-yellow-600">
+                        {latestDetection.metrics?.persons_without_vest || 0}
+                      </p>
+                    </div>
                   </div>
                 </div>
               )}
@@ -285,10 +317,16 @@ const DetectLivePage = () => {
                         <div className="flex items-center justify-between">
                           <div>
                             <p className="font-medium text-gray-800">
+                              {detection.track_id && (
+                                <span className="inline-block px-2 py-0.5 mr-2 text-xs font-bold bg-indigo-100 text-indigo-700 rounded">
+                                  #{detection.track_id}
+                                </span>
+                              )}
                               {detection.label}
                             </p>
                             <p className="text-sm text-gray-600">
                               Confidence: {(detection.confidence * 100).toFixed(1)}%
+                              {detection.hits && ` • Hits: ${detection.hits}`}
                             </p>
                           </div>
                           <span

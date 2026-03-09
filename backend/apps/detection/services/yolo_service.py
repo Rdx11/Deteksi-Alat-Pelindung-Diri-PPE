@@ -1,5 +1,5 @@
 """
-YOLO Detection Service untuk PPE Detection
+YOLO Detection Service untuk PPE Detection dengan Object Tracking
 """
 import cv2
 import numpy as np
@@ -8,16 +8,32 @@ from django.conf import settings
 from PIL import Image
 import io
 import base64
+from .tracker import SFSORTTracker
+
 
 class YOLODetectionService:
-    """Service untuk menjalankan deteksi YOLO pada gambar/frame"""
+    """Service untuk menjalankan deteksi YOLO pada gambar/frame dengan tracking"""
     
-    def __init__(self):
-        """Initialize YOLO model"""
+    def __init__(self, enable_tracking=False):
+        """
+        Initialize YOLO model
+        
+        Args:
+            enable_tracking: Enable object tracking (untuk video/live)
+        """
         self.model = None
         self.confidence_threshold = settings.YOLO_CONFIDENCE_THRESHOLD
         self.iou_threshold = settings.YOLO_IOU_THRESHOLD
         self.classes = settings.PPE_CLASSES
+        self.enable_tracking = enable_tracking
+        
+        # Initialize tracker jika enabled
+        self.tracker = SFSORTTracker(
+            max_age=30,      # Keep track for 30 frames without detection
+            min_hits=3,      # Require 3 hits before confirming track
+            iou_threshold=0.3  # IoU threshold for matching
+        ) if enable_tracking else None
+        
         self._load_model()
     
     def _load_model(self):
@@ -54,18 +70,22 @@ class YOLODetectionService:
         return self.detect_frame(image)
 
     
-    def detect_frame(self, frame):
+    def detect_frame(self, frame, use_tracking=None):
         """
-        Deteksi objek pada single frame
+        Deteksi objek pada single frame dengan optional tracking
         
         Args:
             frame: numpy array (BGR format dari OpenCV)
+            use_tracking: Override enable_tracking setting (None = use default)
             
         Returns:
-            dict: Hasil deteksi
+            dict: Hasil deteksi dengan tracking info jika enabled
         """
         if self.model is None:
             raise RuntimeError("YOLO model belum di-load")
+        
+        # Determine if tracking should be used
+        tracking_enabled = use_tracking if use_tracking is not None else self.enable_tracking
         
         # Jalankan inference
         results = self.model(
@@ -102,30 +122,75 @@ class YOLODetectionService:
                     'status': class_info['status'],
                 })
         
-        # Hitung metrics compliance
-        metrics = self.calculate_compliance(detections)
+        # Apply tracking jika enabled
+        tracked_objects = []
+        if tracking_enabled and self.tracker is not None:
+            tracked_objects = self.tracker.update(detections)
+            
+            # Update detections dengan track_id
+            for det in detections:
+                # Find matching tracked object
+                for tracked in tracked_objects:
+                    # Check if bboxes match (with some tolerance)
+                    if self._bbox_match(det['bbox'], tracked['bbox']):
+                        det['track_id'] = tracked['track_id']
+                        det['hits'] = tracked['hits']
+                        det['age'] = tracked['age']
+                        break
         
-        # Gambar annotations
-        annotated_frame = self.draw_annotations(frame.copy(), detections)
+        # Hitung metrics compliance (dengan tracking info jika ada)
+        metrics = self.calculate_compliance(detections, tracked_objects if tracking_enabled else None)
         
-        return {
+        # Gambar annotations (dengan track_id jika ada)
+        annotated_frame = self.draw_annotations(frame.copy(), detections, tracking_enabled)
+        
+        result_dict = {
             'detections': detections,
             'metrics': metrics,
             'annotated_image': annotated_frame
         }
+        
+        # Add tracking statistics jika enabled
+        if tracking_enabled and self.tracker is not None:
+            result_dict['tracking_stats'] = self.tracker.get_statistics()
+        
+        return result_dict
+    
+    def _bbox_match(self, bbox1, bbox2, threshold=0.5):
+        """
+        Check if two bboxes match (using IoU)
+        """
+        x1_1, y1_1, x2_1, y2_1 = bbox1
+        x1_2, y1_2, x2_2, y2_2 = bbox2
+        
+        # Calculate intersection
+        x1_i = max(x1_1, x1_2)
+        y1_i = max(y1_1, y1_2)
+        x2_i = min(x2_1, x2_2)
+        y2_i = min(y2_1, y2_2)
+        
+        if x2_i < x1_i or y2_i < y1_i:
+            return False
+        
+        intersection = (x2_i - x1_i) * (y2_i - y1_i)
+        
+        # Calculate union
+        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+        union = area1 + area2 - intersection
+        
+        iou = intersection / union if union > 0 else 0
+        
+        return iou >= threshold
 
     
-    def calculate_compliance(self, detections):
+    def calculate_compliance(self, detections, tracked_objects=None):
         """
-        Hitung metrics compliance keselamatan
-        
-        Logika:
-        - Hitung total orang dari deteksi 'person' class
-        - Jika tidak ada 'person', estimasi dari jumlah helm/rompi yang terdeteksi
-        - Hitung compliance berdasarkan rasio PPE yang digunakan
+        Hitung metrics compliance keselamatan dengan tracking support
         
         Args:
             detections: List of detection objects
+            tracked_objects: List of tracked objects (optional, untuk accurate counting)
             
         Returns:
             dict: Metrics compliance
@@ -139,34 +204,63 @@ class YOLODetectionService:
             'compliance_score': 0.0,
         }
         
-        # Hitung berdasarkan deteksi
-        person_count = 0
-        helmet_count = 0
-        no_helmet_count = 0
-        vest_count = 0
-        no_vest_count = 0
-        
-        for det in detections:
-            class_name = det['class_name']
+        # Jika tracking enabled, gunakan unique track IDs untuk counting
+        if tracked_objects is not None:
+            # Count unique persons by track_id
+            person_tracks = set()
+            helmet_tracks = set()
+            vest_tracks = set()
+            no_helmet_tracks = set()
+            no_vest_tracks = set()
             
-            if class_name == 'person':
-                person_count += 1
-            elif class_name in ['hardhat', 'helmet']:
-                helmet_count += 1
-            elif class_name in ['safety-vest', 'vest']:
-                vest_count += 1
-            elif class_name in ['no-hardhat', 'no-helmet']:
-                no_helmet_count += 1
-            elif class_name in ['no-safety-vest', 'no-vest']:
-                no_vest_count += 1
+            for tracked in tracked_objects:
+                track_id = tracked['track_id']
+                class_name = tracked['class_name']
+                
+                if class_name == 'person':
+                    person_tracks.add(track_id)
+                elif class_name in ['hardhat', 'helmet']:
+                    helmet_tracks.add(track_id)
+                elif class_name in ['safety-vest', 'vest']:
+                    vest_tracks.add(track_id)
+                elif class_name in ['no-hardhat', 'no-helmet']:
+                    no_helmet_tracks.add(track_id)
+                elif class_name in ['no-safety-vest', 'no-vest']:
+                    no_vest_tracks.add(track_id)
+            
+            # Use tracked counts
+            person_count = len(person_tracks)
+            helmet_count = len(helmet_tracks)
+            vest_count = len(vest_tracks)
+            no_helmet_count = len(no_helmet_tracks)
+            no_vest_count = len(no_vest_tracks)
+        else:
+            # Fallback ke counting biasa (tanpa tracking)
+            person_count = 0
+            helmet_count = 0
+            no_helmet_count = 0
+            vest_count = 0
+            no_vest_count = 0
+            
+            for det in detections:
+                class_name = det['class_name']
+                
+                if class_name == 'person':
+                    person_count += 1
+                elif class_name in ['hardhat', 'helmet']:
+                    helmet_count += 1
+                elif class_name in ['safety-vest', 'vest']:
+                    vest_count += 1
+                elif class_name in ['no-hardhat', 'no-helmet']:
+                    no_helmet_count += 1
+                elif class_name in ['no-safety-vest', 'no-vest']:
+                    no_vest_count += 1
         
         # Tentukan total orang
-        # Prioritas: gunakan deteksi 'person' jika ada
-        # Jika tidak, estimasi dari total deteksi helm + rompi
         if person_count > 0:
             metrics['total_persons'] = person_count
         else:
-            # Estimasi: ambil maksimum dari total helm atau total rompi
+            # Estimasi dari max(total helm, total rompi)
             total_helmet_detections = helmet_count + no_helmet_count
             total_vest_detections = vest_count + no_vest_count
             metrics['total_persons'] = max(total_helmet_detections, total_vest_detections)
@@ -178,19 +272,12 @@ class YOLODetectionService:
         metrics['persons_without_vest'] = no_vest_count
         
         # Hitung compliance score
-        # Compliance = (jumlah PPE yang digunakan) / (total PPE yang seharusnya digunakan)
-        # Total PPE yang seharusnya = total_persons * 2 (helm + rompi)
         if metrics['total_persons'] > 0:
-            total_ppe_required = metrics['total_persons'] * 2  # helm + rompi per orang
+            total_ppe_required = metrics['total_persons'] * 2
             total_ppe_used = helmet_count + vest_count
-            
-            # Jika ada deteksi no-helmet atau no-vest, kurangi dari compliance
             total_ppe_violations = no_helmet_count + no_vest_count
             
-            # Hitung compliance: PPE yang digunakan vs yang seharusnya
-            # Tapi jika ada violation yang terdeteksi, pastikan compliance tidak 100%
             if total_ppe_violations > 0:
-                # Ada pelanggaran terdeteksi
                 safe_count = helmet_count + vest_count
                 total_detections = helmet_count + vest_count + no_helmet_count + no_vest_count
                 if total_detections > 0:
@@ -198,7 +285,6 @@ class YOLODetectionService:
                 else:
                     metrics['compliance_score'] = 0.0
             else:
-                # Tidak ada pelanggaran terdeteksi, hitung dari PPE yang digunakan
                 if total_ppe_required > 0:
                     metrics['compliance_score'] = round(min((total_ppe_used / total_ppe_required) * 100, 100), 2)
                 else:
@@ -207,13 +293,14 @@ class YOLODetectionService:
         return metrics
 
     
-    def draw_annotations(self, frame, detections):
+    def draw_annotations(self, frame, detections, show_track_id=False):
         """
         Gambar bounding boxes dan labels pada frame
         
         Args:
             frame: numpy array (BGR)
             detections: List of detection objects
+            show_track_id: Show track ID jika ada
             
         Returns:
             numpy array: Frame dengan annotations
@@ -238,6 +325,10 @@ class YOLODetectionService:
             
             # Siapkan label text
             label = f"{det['label']} {det['confidence']:.2f}"
+            
+            # Tambahkan track_id jika ada dan enabled
+            if show_track_id and 'track_id' in det:
+                label = f"ID:{det['track_id']} {label}"
             
             # Hitung ukuran text untuk background
             (text_width, text_height), baseline = cv2.getTextSize(
@@ -278,3 +369,14 @@ class YOLODetectionService:
         nparr = np.frombuffer(img_data, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         return frame
+    
+    def reset_tracker(self):
+        """Reset tracker (untuk new video/session)"""
+        if self.tracker is not None:
+            self.tracker.reset()
+    
+    def get_tracking_stats(self):
+        """Get tracking statistics"""
+        if self.tracker is not None:
+            return self.tracker.get_statistics()
+        return None

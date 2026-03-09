@@ -11,9 +11,13 @@ import numpy as np
 
 class DetectionConsumer(AsyncWebsocketConsumer):
     """
-    WebSocket consumer untuk real-time detection
-    Menerima frame dari frontend, jalankan YOLO, kirim hasil kembali
+    WebSocket consumer untuk real-time detection dengan tracking
+    Menerima frame dari frontend, jalankan YOLO dengan tracking, kirim hasil kembali
     """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.yolo_service = None  # Will be initialized per connection
     
     async def connect(self):
         """Handle WebSocket connection"""
@@ -21,6 +25,9 @@ class DetectionConsumer(AsyncWebsocketConsumer):
         self.room_group_name = f'detection_{self.session_id}'
         
         print(f"[CONSUMER] WebSocket connecting: session_id={self.session_id}")
+        
+        # Initialize YOLO service dengan tracking enabled
+        await self.initialize_yolo_service()
         
         # Join room group
         await self.channel_layer.group_add(
@@ -33,11 +40,16 @@ class DetectionConsumer(AsyncWebsocketConsumer):
         
         # Initialize session
         await self.create_or_get_session()
-        print(f"[CONSUMER] Session initialized")
+        print(f"[CONSUMER] Session initialized with tracking enabled")
     
     async def disconnect(self, close_code):
         """Handle WebSocket disconnection"""
         print(f"[CONSUMER] WebSocket disconnecting: close_code={close_code}")
+        
+        # Get final tracking stats
+        if self.yolo_service:
+            stats = await self.get_tracking_stats()
+            print(f"[CONSUMER] Final tracking stats: {stats}")
         
         # Leave room group
         await self.channel_layer.group_discard(
@@ -48,6 +60,20 @@ class DetectionConsumer(AsyncWebsocketConsumer):
         # Mark session as inactive
         await self.deactivate_session()
         print(f"[CONSUMER] WebSocket disconnected")
+    
+    @database_sync_to_async
+    def initialize_yolo_service(self):
+        """Initialize YOLO service dengan tracking"""
+        from .services.yolo_service import YOLODetectionService
+        self.yolo_service = YOLODetectionService(enable_tracking=True)
+        print("[CONSUMER] YOLO service initialized with tracking enabled")
+    
+    @database_sync_to_async
+    def get_tracking_stats(self):
+        """Get tracking statistics"""
+        if self.yolo_service:
+            return self.yolo_service.get_tracking_stats()
+        return None
     
     async def receive(self, text_data):
         """
@@ -79,22 +105,31 @@ class DetectionConsumer(AsyncWebsocketConsumer):
                 }))
                 return
             
-            # Jalankan deteksi
-            print("[CONSUMER] Running detection...")
+            # Jalankan deteksi dengan tracking
+            print("[CONSUMER] Running detection with tracking...")
             result = await self.detect_frame(frame)
             print(f"[CONSUMER] Detection complete: {len(result.get('detections', []))} detections")
+            
+            # Log tracking stats jika ada
+            if 'tracking_stats' in result:
+                print(f"[CONSUMER] Tracking stats: {result['tracking_stats']}")
             
             # Encode annotated frame ke base64
             annotated_base64 = self.frame_to_base64(result['annotated_image'])
             print(f"[CONSUMER] Encoded annotated frame, length: {len(annotated_base64)}")
             
-            # Kirim hasil kembali
+            # Kirim hasil kembali (include tracking stats)
             response_data = {
                 'detections': result['detections'],
                 'metrics': result['metrics'],
                 'annotated_frame': annotated_base64,
                 'timestamp': timezone.now().isoformat(),
             }
+            
+            # Add tracking stats jika ada
+            if 'tracking_stats' in result:
+                response_data['tracking_stats'] = result['tracking_stats']
+            
             print(f"[CONSUMER] Sending response with {len(result['detections'])} detections")
             await self.send(text_data=json.dumps(response_data))
             print("[CONSUMER] Response sent successfully")
@@ -154,11 +189,12 @@ class DetectionConsumer(AsyncWebsocketConsumer):
     
     @database_sync_to_async
     def detect_frame(self, frame):
-        """Run YOLO detection on frame"""
-        from .services.yolo_service import YOLODetectionService
+        """Run YOLO detection on frame dengan tracking"""
+        if self.yolo_service is None:
+            from .services.yolo_service import YOLODetectionService
+            self.yolo_service = YOLODetectionService(enable_tracking=True)
         
-        yolo_service = YOLODetectionService()
-        return yolo_service.detect_frame(frame)
+        return self.yolo_service.detect_frame(frame, use_tracking=True)
     
     def base64_to_frame(self, base64_string):
         """Convert base64 string to numpy array frame"""

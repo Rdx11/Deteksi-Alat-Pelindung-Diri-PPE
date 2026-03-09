@@ -9,7 +9,7 @@ import os
 @shared_task(bind=True)
 def process_video_task(self, session_id):
     """
-    Task untuk memproses video detection
+    Task untuk memproses video detection dengan tracking
     
     Args:
         session_id: UUID dari DetectionSession
@@ -22,8 +22,8 @@ def process_video_task(self, session_id):
         session = DetectionSession.objects.get(id=session_id)
         video_path = session.source_file.path
         
-        # Initialize YOLO service
-        yolo_service = YOLODetectionService()
+        # Initialize YOLO service dengan tracking enabled
+        yolo_service = YOLODetectionService(enable_tracking=True)
         
         # Open video
         cap = cv2.VideoCapture(video_path)
@@ -60,8 +60,8 @@ def process_video_task(self, session_id):
                 }
             )
             
-            # Deteksi frame
-            result = yolo_service.detect_frame(frame)
+            # Deteksi frame dengan tracking
+            result = yolo_service.detect_frame(frame, use_tracking=True)
             
             # Simpan annotated frame
             annotated_dir = f"media/annotated/{session_id}"
@@ -95,6 +95,9 @@ def process_video_task(self, session_id):
         
         cap.release()
         
+        # Get final tracking stats
+        tracking_stats = yolo_service.get_tracking_stats()
+        
         # Mark session as completed
         session.completed_at = timezone.now()
         session.is_active = False
@@ -104,7 +107,8 @@ def process_video_task(self, session_id):
             'session_id': str(session_id),
             'total_frames': total_frames,
             'processed_frames': processed_count,
-            'message': 'Video berhasil diproses'
+            'tracking_stats': tracking_stats,
+            'message': 'Video berhasil diproses dengan tracking'
         }
         
     except Exception as e:

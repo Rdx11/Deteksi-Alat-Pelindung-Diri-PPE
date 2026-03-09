@@ -38,6 +38,13 @@ export const detectionService = {
     return response.data
   },
   
+  // Get detection results
+  getResults: async (params = {}) => {
+    const queryString = new URLSearchParams(params).toString()
+    const response = await api.get(`/detect/results/${queryString ? '?' + queryString : ''}`)
+    return response.data
+  },
+  
   // Get alerts
   getAlerts: async () => {
     const response = await api.get('/detect/alerts/')
